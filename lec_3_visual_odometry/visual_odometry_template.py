@@ -19,6 +19,9 @@ class VisualOdometry():
         index_params = dict(algorithm=FLANN_INDEX_LSH, table_number=6, key_size=12, multi_probe_level=1)
         search_params = dict(checks=50)
         self.flann = cv2.FlannBasedMatcher(indexParams=index_params, searchParams=search_params)
+        
+        # Scale reference to determine size of translations
+        self.scale_ref = np.linalg.norm(self.gt_poses[0][:3, 3] - self.gt_poses[1][:3, 3])
 
     @staticmethod
     def _load_calib(filepath):
@@ -115,31 +118,75 @@ class VisualOdometry():
         # Return a list of the good matches for each image, sorted such that the n'th descriptor in image i matches the n'th descriptor in image i-1
         # https://docs.opencv.org/master/d1/de0/tutorial_py_feature_homography.html
         
+        
+        # Determine if last three images can be extracted
+        valid = i > 1
+        
         # Extract images
+        img0 = self.images[i - 2] if valid else None
         img1 = self.images[i - 1]
         img2 = self.images[i]
         
         # Find keypoints and descriptors
+        if valid:
+            kp0, des0 = self.orb.detectAndCompute(img0, None)
         kp1, des1 = self.orb.detectAndCompute(img1, None)
         kp2, des2 = self.orb.detectAndCompute(img2, None)
-        
+    
         # Use Flann matcher (query, train)
-        matches = self.flann.knnMatch(des1, des2, k=2)
+        matches_12 = self.flann.knnMatch(des1, des2, k=2)
+        if valid:
+            matches_01 = self.flann.knnMatch(des0, des1, k=2)
+            matches_02 = self.flann.knnMatch(des0, des2, k=2)
         
+        common_matches = []
+        if valid:   
+            # Find features common between all three images
+            for match_01 in matches_01:
+                for match_02 in matches_02:
+                    
+                    # Verify img0 feature is the same
+                    if match_01[0].queryIdx != match_02[0].queryIdx:
+                        continue
+                    
+                    for match_12 in matches_12:
+                        
+                        if match_01[0].trainIdx != match_12[0].queryIdx:
+                            continue
+                        
+                        if match_12[0].trainIdx == match_02[0].trainIdx:
+                            common_matches.append([match_12, match_01, match_02])
+        else:
+            common_matches = matches_12
+            
+        q0 = []
         q1 = []
         q2 = []
-        for m, n in matches:
-            if m.distance < 0.4*n.distance:
-                q1.append(kp1[m.queryIdx].pt)
-                q2.append(kp2[m.trainIdx].pt)
+        thresh = 0.5
+        for match_tuple in common_matches:
+            if valid:
+                m12 = match_tuple[0]
+                m01 = match_tuple[1]
+                m02 = match_tuple[2]
+                
+                if m12[0].distance < thresh * m12[1].distance and m01[0].distance < thresh * m01[1].distance and m02[0].distance < thresh * m02[1].distance:
+                    q0.append(kp0[m01[0].queryIdx].pt)
+                    q1.append(kp1[m12[0].queryIdx].pt)
+                    q2.append(kp2[m12[0].trainIdx].pt)
+            else:
+                if match_tuple[0].distance < thresh*match_tuple[1].distance:
+                    q1.append(kp1[match_tuple[0].queryIdx].pt)
+                    q2.append(kp2[match_tuple[0].trainIdx].pt)
+        
 
+        q0 = np.array(q0)
         q1 = np.array(q1)
         q2 = np.array(q2)
         
-        return q1, q2
+        return q0, q1, q2
         
 
-    def get_pose(self, q1, q2):
+    def get_pose(self, q0, q1, q2):
         """
         Calculates the transformation matrix
 
@@ -156,11 +203,50 @@ class VisualOdometry():
         # Use decomp_essential_mat to decompose the Essential matrix into R and t
         # Use the provided function to convert R and t to a transformation matrix T
         
+        # print(q1.shape, q2.shape)
         E, mask  = cv2.findEssentialMat(q1, q2, self.K)    # Could specify RANSAC parameters but nah
         
         right_pair = self.decomp_essential_mat(E, q1, q2)
         
-        return self._form_transf(right_pair[0], right_pair[1])
+        T = self._form_transf(right_pair[0], right_pair[1])
+        
+        scale = self.determine_scale(q0, q1, q2, T)
+        
+        # Save for next iteration and fix scale
+        self.last_transform = T
+        self.last_transform[:3, 3] *= scale
+        
+        return self.last_transform
+    
+    def determine_scale(self, q0, q1, q2, T):
+        
+        # If first iteration, return ground truth scale
+        if len(q0) == 0:
+            return self.scale_ref
+        
+        # Construct projection matrices
+        P0 = self.P @ np.linalg.inv(self.last_transform)
+        P1 = self.P @ np.eye(4, 4)
+        P2 = self.P @ T
+        
+        # Triangulate points
+        Q_01 = cv2.triangulatePoints(P0, P1, q0.T, q1.T)
+        Q_12 = cv2.triangulatePoints(P1, P2, q1.T, q2.T)
+        
+        # Normalize
+        Q_01 = Q_01 / Q_01[3, :]
+        Q_12 = Q_12 / Q_12[3, :]
+        
+        # Find average relative scale (could be performed for even more point pairs)
+        r = []
+        for i in range(Q_01.shape[1] - 1):
+            n = np.linalg.norm(Q_01[:, i] - Q_01[:, i + 1])
+            d = np.linalg.norm(Q_12[:, i] - Q_12[:, i + 1])
+            if d != 0:
+                r.append(n / d)
+
+        print(np.median(r), np.mean(r))
+        return np.median(r)
 
     def decomp_essential_mat(self, E, q1, q2):
         """
@@ -226,11 +312,12 @@ def main():
     gt_path = []
     estimated_path = []
     for i, gt_pose in enumerate(tqdm(vo.gt_poses, unit="pose")):
+        
         if i == 0:
             cur_pose = gt_pose
         else:
-            q1, q2 = vo.get_matches(i)
-            transf = vo.get_pose(q1, q2)
+            q0, q1, q2 = vo.get_matches(i)
+            transf = vo.get_pose(q0, q1, q2)
             cur_pose = np.matmul(cur_pose, np.linalg.inv(transf))
         gt_path.append((gt_pose[0, 3], gt_pose[2, 3]))
         estimated_path.append((cur_pose[0, 3], cur_pose[2, 3]))
