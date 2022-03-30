@@ -49,6 +49,18 @@ class EigenFaces:
         # Save crop and label in a list each, x and y
         # If no face is detected discard label
         # Return x, y
+        for idx, img in enumerate(unprocessed_imgs):
+            unprocessed_imgs[idx] = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+            unprocessed_imgs[idx] = cv2.equalizeHist(unprocessed_imgs[idx])
+            
+            #-- Detect faces
+            faces = self.face_cascade.detectMultiScale(unprocessed_imgs[idx])
+            
+            for (x,y,w,h) in faces:
+                center = (x + w // 2, y + h // 2)
+                faceROI = unprocessed_imgs[idx][y:y+h,x:x+w]
+                cv2.imshow('Capture - Face detection', faceROI)
+            
         pass
 
     def train(self, x, n_vecs):
@@ -175,8 +187,8 @@ def split_data(dataset, test_size=0.2):
 
 if __name__ == "__main__":
     dataset = '../data/5-celebrity-faces'
-    n_vecs = 0  # number of the most significant eigenfaces to use. Type int
-    face_size = (0, 0)  # size of the face to use
+    n_vecs = 25  # number of the most significant eigenfaces to use. Type int
+    face_size = (256, 256)  # size of the face to use
     assert n_vecs != 0 and face_size != (0,0), "Remember to change n_vecs and face_size in main"
 
 
