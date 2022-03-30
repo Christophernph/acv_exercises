@@ -177,7 +177,9 @@ class FaceNet():
         x_train (ndaray): The training images
         y_train (list): The training labels
         """
-        pass
+
+        # Find embeddings for each image
+        self.encodings, self.y_train = self.process_images(x_train, y_train)
 
     def process_images(self, images, labels):
         """
@@ -194,11 +196,23 @@ class FaceNet():
         y (ndarray): The names for the faces
 
         """
-        pass
+        
+        # Generate encodings for all faces
+        encodings, y_ = [], []
+        for idx, img in enumerate(images):
+            
+            encoding = fr.face_encodings(img)
+            
+            # A minimum one face was found, save embedding and label
+            if len(encoding) > 0:
+                encodings.append(encoding[0])
+                y_.append(labels[idx])
+
+        return encodings, y_
 
     def predict(self, encoding):
         """
-        Predict how's face are present in the face vector
+        Predict who's face are present in the face vector
 
         Parameters
         ----------
@@ -208,7 +222,10 @@ class FaceNet():
         -------
         label (str): The name of the predicted person
         """
-        pass
+        
+        dist = fr.face_distance(self.encodings, encoding)
+        
+        return self.y_train[np.argmin(dist)]
 
 
 def split_data(dataset, test_size=0.2):
@@ -239,7 +256,9 @@ def split_data(dataset, test_size=0.2):
 
 
 if __name__ == "__main__":
-    dataset = os.path.dirname(os.path.abspath(__file__)) + '/../data/5-celebrity-faces'
+    
+    abs_dir = os.path.dirname( os.path.abspath(__file__))
+    dataset = os.path.join(abs_dir, '../data/5-celebrity-faces')
     n_vecs = 16  # number of the most significant eigenfaces to use. Type int
     face_size = (16, 16)  # size of the face to use
     assert n_vecs != 0 and face_size != (0,0), "Remember to change n_vecs and face_size in main"
