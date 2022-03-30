@@ -49,19 +49,50 @@ class EigenFaces:
         # Save crop and label in a list each, x and y
         # If no face is detected discard label
         # Return x, y
+        x_, y_ = [], []
         for idx, img in enumerate(unprocessed_imgs):
+            
             unprocessed_imgs[idx] = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
             unprocessed_imgs[idx] = cv2.equalizeHist(unprocessed_imgs[idx])
             
             #-- Detect faces
             faces = self.face_cascade.detectMultiScale(unprocessed_imgs[idx])
             
-            for (x,y,w,h) in faces:
-                center = (x + w // 2, y + h // 2)
+            # Several faces of interest
+            if len(faces) > 1:
+                
+                print("Person of interest", labels[idx])
+                for (x, y, w, h) in faces:
+                    
+                    faceROI = unprocessed_imgs[idx][y:y+h,x:x+w]
+                    faceROI = cv2.resize(faceROI, (128, 128))
+                    cv2.imshow('Capture - Face detection', faceROI)
+                    
+                    while True:
+                        k = cv2.waitKey()
+                        if k == ord('y'):
+                            faceROI_ = cv2.resize(faceROI, self.face_size)
+                            x_.append(faceROI_.reshape((-1)))
+                            y_.append(labels[idx])
+                            break
+                        elif k == ord('n'):
+                            break
+                
+                    if k == ord('y'):
+                        break
+                
+            # incase of only detecting one face
+            elif len(faces) == 1:
+                
+                (x, y, w, h) = faces[0]
+                
                 faceROI = unprocessed_imgs[idx][y:y+h,x:x+w]
-                cv2.imshow('Capture - Face detection', faceROI)
-            
-        pass
+                faceROI = cv2.resize(faceROI, self.face_size)
+                
+                x_.append(faceROI.copy().reshape((-1)))
+                y_.append(labels[idx])
+
+        return np.vstack(x_), y_
 
     def train(self, x, n_vecs):
         """
@@ -81,7 +112,26 @@ class EigenFaces:
         # Use Eigen value decomposition on the covariance matrix
         # Remove all except the n_vecs best Eigen vectors
         # Project the input to face space and return them
-        pass
+        
+        # determine mean
+        self.m = np.mean(x, axis=0)
+        
+        # make facespace i.e. pca
+        cov = np.cov(x.T)
+        w, v = np.linalg.eig(cov)
+        w = np.real(w)
+        indices = np.argsort(w)
+        w = w[indices]
+        v = v[:, indices]
+        self.eigen_face = v[:, -n_vecs:]
+        
+        # project all the training vectors
+        x_projected = [] 
+        for x_ in x:
+            x_projected.append(self.project(x_).reshape((1, -1)))
+        
+        # return projected training vectors 
+        return np.vstack(x_projected)
 
     def project(self, face_vector):
         """
@@ -96,11 +146,11 @@ class EigenFaces:
         face_project (ndarray): The projection of the face vectors. Shape (n_vecs)
         """
         # Project the image to face space
-        pass
+        return (face_vector - self.m) @ self.eigen_face
 
     def predict(self, face_vector):
         """
-        Predict how's face are present in the face vector
+        Predict who's face is present in the face vector
 
         Parameters
         ----------
@@ -113,6 +163,9 @@ class EigenFaces:
         # Use self.project(...) to project the image to face space
         # Calculate the distance to each encoding in the train set
         # Return the label of the training example closest to the new example
+        face_project = self.project(face_vector)
+        dist_vec = np.linalg.norm((self.x_train - face_project.reshape((1, -1))), axis=1)
+        return self.y_train[np.argmin(dist_vec)]
 
 
 # Optional
@@ -186,11 +239,10 @@ def split_data(dataset, test_size=0.2):
 
 
 if __name__ == "__main__":
-    dataset = '../data/5-celebrity-faces'
-    n_vecs = 25  # number of the most significant eigenfaces to use. Type int
-    face_size = (256, 256)  # size of the face to use
+    dataset = os.path.dirname(os.path.abspath(__file__)) + '/../data/5-celebrity-faces'
+    n_vecs = 16  # number of the most significant eigenfaces to use. Type int
+    face_size = (16, 16)  # size of the face to use
     assert n_vecs != 0 and face_size != (0,0), "Remember to change n_vecs and face_size in main"
-
 
     # Load the dataset and split it into train and test set
     x_train, x_test, y_train, y_test = split_data(dataset)
@@ -201,17 +253,22 @@ if __name__ == "__main__":
 
     # Process the test images
     x_test_proc, y_test_proc = eigenface.process_images(x_test, y_test)
+    
     # Preform face recognition
     y_pred = [eigenface.predict(image) for image in x_test_proc]
+    
     # Print the classification report
     print(classification_report(y_test_proc, y_pred))
 
     # -- FaceNet --
     # Create a FaceNet detector with the training images
     facenet = FaceNet(x_train, y_train)
+    
     # Process the test images
     x_test_proc, y_test_proc = facenet.process_images(x_test, y_test)
+    
     # Preform face recognition
     y_pred = [facenet.predict(encoding) for encoding in x_test_proc]
+    
     # Print the classification report
     print(classification_report(y_test_proc, y_pred))
